@@ -1,9 +1,12 @@
-import { Router } from 'express';
-import namesRouter from './names.routes';
+// src/routes/index.ts
+import { Router } from "express";
 
 const router = Router();
 
-router.post('/health', (_req, res) => res.json({ ok: true }));
-router.use('/names', namesRouter);
+// keep your existing POST /health (unchanged)
+router.post("/health", (_req, res) => res.json({ ok: true }));
+
+// (optional convenience) add GET /health too — safe, non-breaking
+router.get("/health", (_req, res) => res.json({ ok: true }));
 
 export default router;

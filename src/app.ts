@@ -1,31 +1,51 @@
-import express from 'express';
-import helmet from 'helmet';
-import cors from 'cors';
-import compression from 'compression';
-import rateLimit from 'express-rate-limit';
-import routes from './routes';
-import { Env } from './config/env';
-import { errorHandler } from './middleware/error';
+// src/app.ts
+import express from "express";
+import cors from "cors";
+import cookieParser from "cookie-parser";
 
-export function createApp() {
-  const app = express();
+import { Env } from "./config/env";
 
-  // Basic request log (optional)
-  // app.use((req, _res, next) => { console.log('INCOMING', req.method, req.url); next(); });
+// Routers
+import indexRoutes from "./routes";               // now only /health lives here
+import authRoutes from "./routes/auth.routes";    // mount explicitly
+import namesRoutes from "./routes/names.routes";  // mount explicitly
+import { ensureCsrfCookie } from "./middleware/auth";
 
-  app.use(helmet({ contentSecurityPolicy: false }));
-  app.use(cors({ origin: Env.CORS_ORIGIN.length ? Env.CORS_ORIGIN : '*' }));
-  app.use(compression());
-  app.use(express.json({ limit: '64kb' }));
-  app.use('/api/', rateLimit({ windowMs: 60_000, max: 60, standardHeaders: true }));
+const app = express();
 
-  app.use('/api', routes);
+/** Body + cookies */
+app.use(express.json({ limit: "2mb" }));
+app.use(cookieParser());
 
-  // 404
-  app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+/** CORS with credentials, allow only configured origins */
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // same-origin / tools
+      if (Env.CORS_ORIGIN.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  })
+);
 
-  // Error middleware
-  app.use(errorHandler);
+app.use(ensureCsrfCookie); // issues csrf_token cookie on safe requests if missing
 
-  return app;
-}
+/** (Optional) separate readiness probe */
+app.get("/ready", (_req, res) => res.json({ ready: true }));
+
+/** Explicit mounts */
+app.use("/api/auth", authRoutes);
+app.use("/api/names", namesRoutes);
+
+/** Health routes from index router */
+app.use("/api", indexRoutes);
+
+/** Centralized error handler */
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const status = err.status || 500;
+  const message = err.message || "Internal Server Error";
+  res.status(status).json({ message });
+});
+
+export default app;

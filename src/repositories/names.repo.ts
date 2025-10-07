@@ -1,3 +1,4 @@
+import { PoolClient } from 'pg';
 import { pool } from '../db/pool';
 
 export function like(text: string) {
@@ -117,4 +118,149 @@ export async function deriveCursorIdMV(searchTextLower: string, offset: number):
   `;
   const r = await pool.query(sql, [like(searchTextLower), Math.max(0, offset - 1)]);
   return r.rows[0]?.name_id ?? null;
+}
+
+/** Transaction helper */
+export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const out = await fn(client);
+    await client.query('COMMIT');
+    return out;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+export type VariantUpsertItem = { language_id: number; value: string };
+export type MeaningUpsertItem = { language_id: number; value: string };
+
+export type UpsertResult<T extends { language_id: number; value: string }> = {
+  insertedCount: number;
+  duplicateCount: number;
+  duplicates: T[];
+};
+
+/** Create or fetch a name row by canonical_key. */
+export async function ensureName(canonicalKey: string, client?: PoolClient): Promise<number> {
+  const q = `
+    INSERT INTO names (canonical_key)
+    VALUES ($1)
+    ON CONFLICT (canonical_key)
+    DO UPDATE SET updated_at = now()
+    RETURNING id
+  `;
+  const db = client ?? pool;
+  const { rows } = await db.query<{ id: number }>(q, [canonicalKey]);
+  return rows[0].id;
+}
+
+/** Batch upsert for name_variants */
+export async function upsertVariants(
+  nameId: number,
+  items: VariantUpsertItem[],
+  client?: PoolClient
+): Promise<UpsertResult<VariantUpsertItem>> {
+  if (!items.length) return { insertedCount: 0, duplicateCount: 0, duplicates: [] };
+
+  const nameIds = new Array(items.length).fill(nameId);
+  const langIds = items.map(i => i.language_id);
+  const values  = items.map(i => i.value);
+
+  const q = `
+    WITH data AS (
+      SELECT
+        unnest($1::int[])  AS name_id,
+        unnest($2::int[])  AS language_id,
+        unnest($3::text[]) AS variant_name
+    ),
+    ins AS (
+      INSERT INTO name_variants (name_id, language_id, variant_name)
+      SELECT name_id, language_id, variant_name
+      FROM data
+      ON CONFLICT (name_id, language_id, variant_name) DO NOTHING
+      RETURNING name_id, language_id, variant_name
+    )
+    SELECT (SELECT count(*)::int FROM ins) AS inserted_count
+  `;
+  const db = client ?? pool;
+  const { rows } = await db.query<{ inserted_count: number }>(q, [nameIds, langIds, values]);
+
+  const insertedCount = rows[0]?.inserted_count ?? 0;
+  const duplicateCount = items.length - insertedCount;
+
+  const existed = await db.query<{ language_id: number; value: string }>(
+    `
+      SELECT language_id, variant_name AS value
+      FROM name_variants
+      WHERE name_id = $1
+        AND EXISTS (
+          SELECT 1 FROM unnest($2::int[], $3::text[]) AS t(lang_id, val)
+          WHERE t.lang_id = name_variants.language_id AND t.val = name_variants.variant_name
+        )
+    `,
+    [nameId, langIds, values]
+  );
+
+  const existedSet = new Set(existed.rows.map(r => `${r.language_id}|${r.value}`));
+  const duplicates = items.filter(i => existedSet.has(`${i.language_id}|${i.value}`));
+
+  return { insertedCount, duplicateCount, duplicates };
+}
+
+/** Batch upsert for name_meanings (fixed to use 'meaning' column) */
+export async function upsertMeanings(
+  nameId: number,
+  items: MeaningUpsertItem[],
+  client?: PoolClient
+): Promise<UpsertResult<MeaningUpsertItem>> {
+  if (!items.length) return { insertedCount: 0, duplicateCount: 0, duplicates: [] };
+
+  const nameIds = new Array(items.length).fill(nameId);
+  const langIds = items.map(i => i.language_id);
+  const values  = items.map(i => i.value);
+
+  const q = `
+    WITH data AS (
+      SELECT
+        unnest($1::int[])  AS name_id,
+        unnest($2::int[])  AS language_id,
+        unnest($3::text[]) AS meaning
+    ),
+    ins AS (
+      INSERT INTO name_meanings (name_id, language_id, meaning)
+      SELECT name_id, language_id, meaning
+      FROM data
+      ON CONFLICT (name_id, language_id, meaning) DO NOTHING
+      RETURNING name_id, language_id, meaning
+    )
+    SELECT (SELECT count(*)::int FROM ins) AS inserted_count
+  `;
+  const db = client ?? pool;
+  const { rows } = await db.query<{ inserted_count: number }>(q, [nameIds, langIds, values]);
+
+  const insertedCount = rows[0]?.inserted_count ?? 0;
+  const duplicateCount = items.length - insertedCount;
+
+  const existed = await db.query<{ language_id: number; value: string }>(
+    `
+      SELECT language_id, meaning AS value
+      FROM name_meanings
+      WHERE name_id = $1
+        AND EXISTS (
+          SELECT 1 FROM unnest($2::int[], $3::text[]) AS t(lang_id, val)
+          WHERE t.lang_id = name_meanings.language_id AND t.val = name_meanings.meaning
+        )
+    `,
+    [nameId, langIds, values]
+  );
+
+  const existedSet = new Set(existed.rows.map(r => `${r.language_id}|${r.value}`));
+  const duplicates = items.filter(i => existedSet.has(`${i.language_id}|${i.value}`));
+
+  return { insertedCount, duplicateCount, duplicates };
 }
