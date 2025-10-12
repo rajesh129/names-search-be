@@ -1,5 +1,5 @@
 // src/middleware/auth.ts
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response, NextFunction, CookieOptions } from "express";
 import jwt from "jsonwebtoken";
 import { createHmac, randomBytes, timingSafeEqual } from "crypto";
 import { Env } from "../config/env";
@@ -16,18 +16,16 @@ function forbidden(res: Response, message = "Forbidden") {
 /** AuthN: requires a valid access_token cookie (JWT) */
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = req.cookies?.["access_token"];
-  if (!token) return unauthorized(res);
-
+  if (!token) return res.status(401).json({ message: "No access_token cookie" });
   try {
     const payload = jwt.verify(token, Env.AUTH_JWT_SECRET, {
       issuer: "names-search",
       audience: "api",
-    }) as unknown as JwtUser;
-
-    (req as any).user = payload; // attach { sub, role, iat, exp }
+    });
+    (req as any).user = payload;
     return next();
-  } catch {
-    return unauthorized(res, "Invalid or expired token");
+  } catch (e:any) {
+    return res.status(401).json({ message: `Invalid/expired access_token: ${e?.name || 'error'}` });
   }
 }
 
@@ -95,17 +93,21 @@ function verifyCsrfToken(token: string): boolean {
  * Sets a CSRF cookie if absent. Use on GET/HEAD (safe methods) or globally.
  * Cookie is NOT HttpOnly so the FE can read it and mirror to the header.
  */
+const isDev = Env.NODE_ENV === 'development';
+const isDevCrossSite = false; // or drive from an ENV var
 export function ensureCsrfCookie(req: Request, res: Response, next: NextFunction) {
   const method = req.method.toUpperCase();
   const isSafe = method === "GET" || method === "HEAD" || method === "OPTIONS";
   // We can set this on any request; typically done on safe methods.
   const hasCookie = Boolean(req.cookies?.[CSRF_COOKIE]);
+  const sameSite: CookieOptions["sameSite"] = isDev ? "lax" : "strict";
+
   if (!hasCookie && isSafe) {
     const token = makeCsrfToken();
     res.cookie(CSRF_COOKIE, token, {
       httpOnly: false,                // FE must read and reflect to header
-      secure: true,                   // keep true; use HTTPS in dev or toggle if needed
-      sameSite: "strict",
+      secure: !isDev,                   // keep true; use HTTPS in dev or toggle if needed
+      sameSite,
       maxAge: 1000 * 60 * 60 * 24,    // 1 day
       path: "/",
     });
@@ -118,17 +120,11 @@ export function ensureCsrfCookie(req: Request, res: Response, next: NextFunction
  * Require header x-csrf-token and cookie csrf_token to match and validate signature.
  */
 export function verifyCsrf(req: Request, res: Response, next: NextFunction) {
-  const header = String(req.headers[CSRF_HEADER] || "");
-  const cookie = String(req.cookies?.[CSRF_COOKIE] || "");
-  if (!header || !cookie) {
-    return unauthorized(res, "CSRF token missing");
-  }
-  if (header !== cookie) {
-    return unauthorized(res, "CSRF token mismatch");
-  }
-  if (!verifyCsrfToken(header)) {
-    return unauthorized(res, "Invalid CSRF token");
-  }
+  const header = String(req.headers["x-csrf-token"] || "");
+  const cookie = String(req.cookies?.["csrf_token"] || "");
+  if (!header || !cookie) return res.status(401).json({ message: "CSRF token missing (header or cookie)" });
+  if (header !== cookie) return res.status(401).json({ message: "CSRF token mismatch" });
+  if (!verifyCsrfToken(header)) return res.status(401).json({ message: "CSRF token invalid signature" });
   return next();
 }
 

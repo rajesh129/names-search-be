@@ -1,5 +1,5 @@
 // src/controllers/auth.controller.ts
-import { Request, Response } from "express";
+import { CookieOptions, Request, Response } from "express";
 import { z } from "zod";
 import jwt from "jsonwebtoken";
 import { AuthService } from "../services/auth.service";
@@ -59,11 +59,17 @@ const svc = new AuthService();
 const usersRepo = new UsersRepo();
 
 // ---- Cookie helpers ----
+const isDev = Env.NODE_ENV === 'development';
+const isDevCrossSite = false; // or drive from an ENV var
+
+
 function cookieOptions(maxAgeMs: number) {
+    const sameSite: CookieOptions["sameSite"] =
+    isDev && isDevCrossSite ? "none" : (isDev ? "lax" : "strict");
   return {
     httpOnly: true,
-    secure: true, // set to true in prod (HTTPS); keep true to be safe
-    sameSite: "strict" as const,
+    secure: isDev && isDevCrossSite ? false : !isDev, // set to true in prod (HTTPS); keep true to be safe
+    sameSite,
     maxAge: maxAgeMs,
   };
 }
